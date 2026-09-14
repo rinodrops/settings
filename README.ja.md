@@ -197,6 +197,8 @@ ARCH slug: `darwin-arm64`, `darwin-x86_64`, `windows-x86_64`, `linux-x86_64`。
 
 **https://emotiongraphics.jp/docs/ja/ref/settings/**
 
+`multiline` の `rows` は表示行数（省略時 4）。溢れた値はウィジェット内でスクロールし，フォーム全体は伸びない。
+
 ### `segmented_control` と `type`
 
 `segmented_control` は既定で文字列（`type` 省略または `type = "string"`）を読み書きします。

@@ -1086,6 +1086,7 @@ pub struct Field {
     /// `segmented_control`, and similar widgets. Full available width when omitted.
     pub max_width: Option<f32>,
     /// Number of visible rows for `multiline` widgets. Defaults to 4 when omitted.
+    /// Overflow scrolls inside the widget; the form layout is not stretched.
     pub rows: Option<usize>,
     /// Minimum numeric value for `slider` and `drag_value` widgets.
     pub min: Option<f64>,
