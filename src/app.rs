@@ -1048,8 +1048,8 @@ enum LabelAnchor {
     /// label is centered on the same row.
     Center,
     /// The widget is a tall stack whose first row carries the meaningful text
-    /// (the radio group).  The label aligns to that first line instead of the
-    /// vertical middle of the whole widget.
+    /// (`exclusive_radio`, `multiline`).  The label aligns to that first line
+    /// instead of the vertical middle of the whole widget.
     FirstLine,
 }
 
@@ -1058,6 +1058,8 @@ fn label_anchor(kind: &WidgetKind) -> LabelAnchor {
     match kind {
         // A vertical list of options; align the label to the first one.
         WidgetKind::ExclusiveRadio => LabelAnchor::FirstLine,
+        // A multi-row box; align the label to the first visible text line.
+        WidgetKind::Multiline => LabelAnchor::FirstLine,
         // Everything else vertically centers its text within the widget box.
         _ => LabelAnchor::Center,
     }
@@ -1126,11 +1128,35 @@ fn render_field(
     });
 
     // Widget column — FOCUS_RING_PAD inset on each side provides room for the focus ring.
+    // Pack from the top: Grid cells inherit `left_to_right(Align::Center)` and the
+    // Frame would otherwise vertically center its child in leftover panel height,
+    // which inflates `min_rect` and floats tall widgets (multiline) down the tab.
     let cell = egui::Frame::default()
         .inner_margin(egui::Margin::symmetric(FOCUS_RING_PAD as i8, 0))
         .show(ui, |ui| {
-            if let Some(sl) = &field.sublabel {
-                ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                if let Some(sl) = &field.sublabel {
+                    ui.horizontal(|ui| {
+                        render_widget_inner(
+                            ui,
+                            field,
+                            key_path,
+                            schema,
+                            validation,
+                            invalid,
+                            config,
+                            show_secrets,
+                            pending,
+                            accent,
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(sl.get())
+                                .size(FIELD_FONT_PX)
+                                .color(ui.visuals().text_color()),
+                        );
+                    });
+                } else {
                     render_widget_inner(
                         ui,
                         field,
@@ -1143,27 +1169,8 @@ fn render_field(
                         pending,
                         accent,
                     );
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(sl.get())
-                            .size(FIELD_FONT_PX)
-                            .color(ui.visuals().text_color()),
-                    );
-                });
-            } else {
-                render_widget_inner(
-                    ui,
-                    field,
-                    key_path,
-                    schema,
-                    validation,
-                    invalid,
-                    config,
-                    show_secrets,
-                    pending,
-                    accent,
-                );
-            }
+                }
+            });
         });
 
     // Remember the rendered widget height for the next frame's label placement.
@@ -1225,18 +1232,7 @@ fn render_widget_inner(
         }
 
         WidgetKind::Multiline => {
-            let current = config.get_str(key_path).unwrap_or("").to_owned();
-            let mut buf = current.clone();
-            let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
-            let resp = ui.add(
-                egui::TextEdit::multiline(&mut buf)
-                    .desired_rows(field.rows.unwrap_or(4))
-                    .desired_width(w),
-            );
-            paint_field_border(ui, &resp, accent, invalid);
-            if resp.changed() {
-                config.set_str(key_path, &buf);
-            }
+            render_multiline(ui, field, key_path, config, accent, invalid);
         }
 
         WidgetKind::Select => {
@@ -1289,6 +1285,72 @@ fn render_widget_inner(
         WidgetKind::KeyValueMap => {
             render_key_value_map(ui, field, key_path, config, accent);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: multiline
+
+/// Fixed-height multiline editor.  `rows` is the visible height; overflow
+/// scrolls inside the widget so the form Grid is not stretched by long values.
+fn render_multiline(
+    ui: &mut egui::Ui,
+    field: &Field,
+    key_path: &str,
+    config: &mut ConfigStore,
+    accent: egui::Color32,
+    invalid: bool,
+) {
+    let current = config.get_str(key_path).unwrap_or("").to_owned();
+    let mut buf = current.clone();
+    let rows = field.rows.unwrap_or(4);
+    let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
+    let row_h = ui.text_style_height(&egui::TextStyle::Body);
+    let h = row_h * rows as f32 + TEXTEDIT_MARGIN_Y;
+
+    let mut changed = false;
+    let mut focused = false;
+    let pal = theme::current();
+    let cr = egui::CornerRadius::same(FIELD_ROUNDING);
+    let idle_stroke = egui::Stroke::new(FIELD_BORDER_W_IDLE, pal.field_border);
+    // Idle fill + border live on this outer frame so they do not scroll away with
+    // the inner TextEdit.  The TextEdit itself is frameless for the same reason.
+    // inner_margin keeps glyphs inside the 1 px inside-stroke; the stroke is
+    // painted again after the content so mid-line clips cannot cover the border.
+    let viewport = egui::Frame::NONE
+        .inner_margin(egui::Margin::same(FIELD_BORDER_W_IDLE as i8))
+        .fill(pal.surface)
+        .stroke(idle_stroke)
+        .corner_radius(cr)
+        .show(ui, |ui| {
+            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+            ui.set_min_size(egui::vec2(w, h));
+            ui.set_max_size(egui::vec2(w, h));
+            egui::ScrollArea::vertical()
+                .id_salt(("multiline", key_path))
+                .max_height(h)
+                .min_scrolled_height(h)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let resp = ui.add(
+                        egui::TextEdit::multiline(&mut buf)
+                            .frame(false)
+                            .desired_rows(rows)
+                            .desired_width(ui.available_width()),
+                    );
+                    changed = resp.changed();
+                    focused = resp.has_focus();
+                });
+        });
+    ui.painter().rect_stroke(
+        viewport.response.rect,
+        cr,
+        idle_stroke,
+        egui::StrokeKind::Inside,
+    );
+    paint_field_border_at(ui, viewport.response.rect, focused, accent, invalid);
+    if changed {
+        config.set_str(key_path, &buf);
     }
 }
 
@@ -2670,9 +2732,19 @@ fn paint_field_border(
     accent: egui::Color32,
     invalid: bool,
 ) {
+    paint_field_border_at(ui, resp.rect, resp.has_focus(), accent, invalid);
+}
+
+fn paint_field_border_at(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    has_focus: bool,
+    accent: egui::Color32,
+    invalid: bool,
+) {
     let color = if invalid {
         theme::current().error
-    } else if resp.has_focus() {
+    } else if has_focus {
         accent
     } else {
         return;
@@ -2680,7 +2752,7 @@ fn paint_field_border(
     // StrokeKind::Middle: the stroke is centered on the rect boundary.
     let half_w = FOCUS_RING_W * 0.5;
     ui.painter().rect_stroke(
-        resp.rect.expand(FOCUS_RING_GAP + half_w),
+        rect.expand(FOCUS_RING_GAP + half_w),
         egui::CornerRadius::same(FOCUS_RING_ROUNDING),
         egui::Stroke::new(FOCUS_RING_W, color),
         egui::StrokeKind::Middle,
