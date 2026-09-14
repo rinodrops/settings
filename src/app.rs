@@ -644,7 +644,6 @@ fn show_flat_fields(
                         accent,
                     );
                     ui.end_row();
-                    render_field_feedback(ui, &errors, field_hint(field, key_path, config));
                 }
             });
     });
@@ -745,7 +744,6 @@ fn show_section_map(
                             accent,
                         );
                         ui.end_row();
-                        render_field_feedback(ui, &errors, field_hint(field, &key_path, config));
                     }
                 });
     });
@@ -1099,14 +1097,19 @@ fn render_field(
     let b_label = first_line_baseline(ui.ctx(), label_id);
     let line_input_h = r + TEXTEDIT_MARGIN_Y;
 
-    // Widget height measured on the previous frame (layout is stable, so this
-    // is exact after the first frame).  Falls back to a single-line input.
+    // Widget height (excluding hint) measured on the previous frame.
     let height_id = egui::Id::new(("field_widget_h", key_path));
+    let total_id = egui::Id::new(("field_cell_h", key_path));
     let measured = ui
         .ctx()
         .data(|d| d.get_temp::<f32>(height_id))
         .unwrap_or(line_input_h);
     let row_h = measured.max(line_input_h);
+    let cell_h = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(total_id))
+        .unwrap_or(row_h)
+        .max(row_h);
 
     // Target baseline of the label, measured from the row's top edge.
     let target = match label_anchor(&field.widget) {
@@ -1118,8 +1121,10 @@ fn render_field(
     let label_space = (target - b_label).max(0.0);
 
     // Label column: bold, right-aligned, baseline placed at `target`.
+    // `cell_h` matches the value column (widget + hint) so Grid LEFT_CENTER
+    // does not vertically center a shorter label cell.
     ui.vertical(|ui| {
-        ui.set_min_height(row_h);
+        ui.set_min_height(cell_h);
         ui.add_space(label_space);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             ui.label(egui::RichText::new(field.label.get())
@@ -1135,47 +1140,60 @@ fn render_field(
         .inner_margin(egui::Margin::symmetric(FOCUS_RING_PAD as i8, 0))
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                if let Some(sl) = &field.sublabel {
-                    ui.horizontal(|ui| {
-                        render_widget_inner(
-                            ui,
-                            field,
-                            key_path,
-                            schema,
-                            validation,
-                            invalid,
-                            config,
-                            show_secrets,
-                            pending,
-                            accent,
-                        );
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(sl.get())
-                                .size(FIELD_FONT_PX)
-                                .color(ui.visuals().text_color()),
-                        );
-                    });
-                } else {
-                    render_widget_inner(
-                        ui,
-                        field,
-                        key_path,
-                        schema,
-                        validation,
-                        invalid,
-                        config,
-                        show_secrets,
-                        pending,
-                        accent,
-                    );
-                }
+                let widget_h = ui
+                    .scope(|ui| {
+                        if let Some(sl) = &field.sublabel {
+                            ui.horizontal(|ui| {
+                                render_widget_inner(
+                                    ui,
+                                    field,
+                                    key_path,
+                                    schema,
+                                    validation,
+                                    invalid,
+                                    config,
+                                    show_secrets,
+                                    pending,
+                                    accent,
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(sl.get())
+                                        .size(FIELD_FONT_PX)
+                                        .color(ui.visuals().text_color()),
+                                );
+                            });
+                        } else {
+                            render_widget_inner(
+                                ui,
+                                field,
+                                key_path,
+                                schema,
+                                validation,
+                                invalid,
+                                config,
+                                show_secrets,
+                                pending,
+                                accent,
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .height();
+                ui.ctx().data_mut(|d| d.insert_temp(height_id, widget_h));
+                // Hint/error in the same cell so leftover Grid `max_rect` cannot
+                // LEFT_CENTER a separate hint row in the remaining panel height.
+                render_field_feedback(
+                    ui,
+                    validation_errors,
+                    field_hint(field, key_path, config),
+                );
             });
         });
 
-    // Remember the rendered widget height for the next frame's label placement.
     ui.ctx()
-        .data_mut(|d| d.insert_temp(height_id, cell.response.rect.height()));
+        .data_mut(|d| d.insert_temp(total_id, cell.response.rect.height()));
 }
 
 fn render_widget_inner(
@@ -2761,43 +2779,22 @@ fn paint_field_border_at(
     );
 }
 
-/// Validation error rows (or hint when no errors). Must follow `ui.end_row()` for the field.
+/// Validation error lines (or hint when no errors).  Called from the value
+/// column, directly under the widget — not as a separate Grid row.
 fn render_field_feedback(ui: &mut egui::Ui, errors: &[String], hint: Option<&str>) {
     if !errors.is_empty() {
-        ui.label("");
-        egui::Frame::default()
-            .inner_margin(egui::Margin {
-                left: FOCUS_RING_PAD as i8,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for err in errors {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(err)
-                                    .size(HINT_FONT_PX)
-                                    .color(theme::current().error),
-                            )
-                            .wrap(),
-                        );
-                    }
-                });
-            });
-        ui.end_row();
+        for err in errors {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(err)
+                        .size(HINT_FONT_PX)
+                        .color(theme::current().error),
+                )
+                .wrap(),
+            );
+        }
     } else if let Some(hint) = hint {
-        ui.label("");
-        egui::Frame::default()
-            .inner_margin(egui::Margin {
-                left: FOCUS_RING_PAD as i8,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(hint).size(HINT_FONT_PX)).wrap(),
-                );
-            });
-        ui.end_row();
+        ui.add(egui::Label::new(egui::RichText::new(hint).size(HINT_FONT_PX)).wrap());
     }
 }
 
