@@ -644,7 +644,6 @@ fn show_flat_fields(
                         accent,
                     );
                     ui.end_row();
-                    render_field_feedback(ui, &errors, field_hint(field, key_path, config));
                 }
             });
     });
@@ -745,7 +744,6 @@ fn show_section_map(
                             accent,
                         );
                         ui.end_row();
-                        render_field_feedback(ui, &errors, field_hint(field, &key_path, config));
                     }
                 });
     });
@@ -1048,8 +1046,8 @@ enum LabelAnchor {
     /// label is centered on the same row.
     Center,
     /// The widget is a tall stack whose first row carries the meaningful text
-    /// (the radio group).  The label aligns to that first line instead of the
-    /// vertical middle of the whole widget.
+    /// (`exclusive_radio`, `multiline`).  The label aligns to that first line
+    /// instead of the vertical middle of the whole widget.
     FirstLine,
 }
 
@@ -1058,6 +1056,8 @@ fn label_anchor(kind: &WidgetKind) -> LabelAnchor {
     match kind {
         // A vertical list of options; align the label to the first one.
         WidgetKind::ExclusiveRadio => LabelAnchor::FirstLine,
+        // A multi-row box; align the label to the first visible text line.
+        WidgetKind::Multiline => LabelAnchor::FirstLine,
         // Everything else vertically centers its text within the widget box.
         _ => LabelAnchor::Center,
     }
@@ -1097,14 +1097,19 @@ fn render_field(
     let b_label = first_line_baseline(ui.ctx(), label_id);
     let line_input_h = r + TEXTEDIT_MARGIN_Y;
 
-    // Widget height measured on the previous frame (layout is stable, so this
-    // is exact after the first frame).  Falls back to a single-line input.
+    // Widget height (excluding hint) measured on the previous frame.
     let height_id = egui::Id::new(("field_widget_h", key_path));
+    let total_id = egui::Id::new(("field_cell_h", key_path));
     let measured = ui
         .ctx()
         .data(|d| d.get_temp::<f32>(height_id))
         .unwrap_or(line_input_h);
     let row_h = measured.max(line_input_h);
+    let cell_h = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(total_id))
+        .unwrap_or(row_h)
+        .max(row_h);
 
     // Target baseline of the label, measured from the row's top edge.
     let target = match label_anchor(&field.widget) {
@@ -1116,8 +1121,10 @@ fn render_field(
     let label_space = (target - b_label).max(0.0);
 
     // Label column: bold, right-aligned, baseline placed at `target`.
+    // `cell_h` matches the value column (widget + hint) so Grid LEFT_CENTER
+    // does not vertically center a shorter label cell.
     ui.vertical(|ui| {
-        ui.set_min_height(row_h);
+        ui.set_min_height(cell_h);
         ui.add_space(label_space);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             ui.label(egui::RichText::new(field.label.get())
@@ -1126,49 +1133,67 @@ fn render_field(
     });
 
     // Widget column — FOCUS_RING_PAD inset on each side provides room for the focus ring.
+    // Pack from the top: Grid cells inherit `left_to_right(Align::Center)` and the
+    // Frame would otherwise vertically center its child in leftover panel height,
+    // which inflates `min_rect` and floats tall widgets (multiline) down the tab.
     let cell = egui::Frame::default()
         .inner_margin(egui::Margin::symmetric(FOCUS_RING_PAD as i8, 0))
         .show(ui, |ui| {
-            if let Some(sl) = &field.sublabel {
-                ui.horizontal(|ui| {
-                    render_widget_inner(
-                        ui,
-                        field,
-                        key_path,
-                        schema,
-                        validation,
-                        invalid,
-                        config,
-                        show_secrets,
-                        pending,
-                        accent,
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(sl.get())
-                            .size(FIELD_FONT_PX)
-                            .color(ui.visuals().text_color()),
-                    );
-                });
-            } else {
-                render_widget_inner(
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                let widget_h = ui
+                    .scope(|ui| {
+                        if let Some(sl) = &field.sublabel {
+                            ui.horizontal(|ui| {
+                                render_widget_inner(
+                                    ui,
+                                    field,
+                                    key_path,
+                                    schema,
+                                    validation,
+                                    invalid,
+                                    config,
+                                    show_secrets,
+                                    pending,
+                                    accent,
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(sl.get())
+                                        .size(FIELD_FONT_PX)
+                                        .color(ui.visuals().text_color()),
+                                );
+                            });
+                        } else {
+                            render_widget_inner(
+                                ui,
+                                field,
+                                key_path,
+                                schema,
+                                validation,
+                                invalid,
+                                config,
+                                show_secrets,
+                                pending,
+                                accent,
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .height();
+                ui.ctx().data_mut(|d| d.insert_temp(height_id, widget_h));
+                // Hint/error in the same cell so leftover Grid `max_rect` cannot
+                // LEFT_CENTER a separate hint row in the remaining panel height.
+                render_field_feedback(
                     ui,
-                    field,
-                    key_path,
-                    schema,
-                    validation,
-                    invalid,
-                    config,
-                    show_secrets,
-                    pending,
-                    accent,
+                    validation_errors,
+                    field_hint(field, key_path, config),
                 );
-            }
+            });
         });
 
-    // Remember the rendered widget height for the next frame's label placement.
     ui.ctx()
-        .data_mut(|d| d.insert_temp(height_id, cell.response.rect.height()));
+        .data_mut(|d| d.insert_temp(total_id, cell.response.rect.height()));
 }
 
 fn render_widget_inner(
@@ -1225,18 +1250,7 @@ fn render_widget_inner(
         }
 
         WidgetKind::Multiline => {
-            let current = config.get_str(key_path).unwrap_or("").to_owned();
-            let mut buf = current.clone();
-            let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
-            let resp = ui.add(
-                egui::TextEdit::multiline(&mut buf)
-                    .desired_rows(field.rows.unwrap_or(4))
-                    .desired_width(w),
-            );
-            paint_field_border(ui, &resp, accent, invalid);
-            if resp.changed() {
-                config.set_str(key_path, &buf);
-            }
+            render_multiline(ui, field, key_path, config, accent, invalid);
         }
 
         WidgetKind::Select => {
@@ -1289,6 +1303,74 @@ fn render_widget_inner(
         WidgetKind::KeyValueMap => {
             render_key_value_map(ui, field, key_path, config, accent);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: multiline
+
+/// Fixed-height multiline editor.  `rows` is the visible height; overflow
+/// scrolls inside the widget so the form Grid is not stretched by long values.
+fn render_multiline(
+    ui: &mut egui::Ui,
+    field: &Field,
+    key_path: &str,
+    config: &mut ConfigStore,
+    accent: egui::Color32,
+    invalid: bool,
+) {
+    let current = config.get_str(key_path).unwrap_or("").to_owned();
+    let mut buf = current.clone();
+    let rows = field.rows.unwrap_or(4);
+    let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
+    let font_id = egui::FontId::new(FIELD_FONT_PX, egui::FontFamily::Proportional);
+    let row_h = ui.fonts(|f| f.row_height(&font_id));
+    let inner_h = row_h * rows as f32 + TEXTEDIT_MARGIN_Y;
+    let border = FIELD_BORDER_W_IDLE;
+    let outer_h = inner_h + 2.0 * border;
+
+    // Claim exactly the schema height.  Grid cells extend `max_rect` to the
+    // panel bottom; a Frame + ScrollArea sized from available height would
+    // otherwise eat leftover `content_height` and push the next Grid row
+    // (the hint) down.  `new_child` paints into this rect without allocating
+    // a second time in the parent.
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, outer_h), egui::Sense::hover());
+
+    let mut changed = false;
+    let mut focused = false;
+    let pal = theme::current();
+    let cr = egui::CornerRadius::same(FIELD_ROUNDING);
+    let idle_stroke = egui::Stroke::new(border, pal.field_border);
+
+    ui.painter().rect_filled(rect, cr, pal.surface);
+    ui.painter().rect_stroke(rect, cr, idle_stroke, egui::StrokeKind::Inside);
+
+    let inner = rect.shrink(border);
+    {
+        let mut inner_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+        inner_ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical()
+            .id_salt(("multiline", key_path))
+            .max_height(inner.height())
+            .min_scrolled_height(inner.height())
+            .auto_shrink([false, false])
+            .show(&mut inner_ui, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::multiline(&mut buf)
+                        .frame(false)
+                        .desired_rows(rows)
+                        .desired_width(ui.available_width()),
+                );
+                changed = resp.changed();
+                focused = resp.has_focus();
+            });
+    }
+
+    // Re-paint the idle stroke so mid-line clips cannot cover the border.
+    ui.painter().rect_stroke(rect, cr, idle_stroke, egui::StrokeKind::Inside);
+    paint_field_border_at(ui, rect, focused, accent, invalid);
+    if changed {
+        config.set_str(key_path, &buf);
     }
 }
 
@@ -2670,9 +2752,19 @@ fn paint_field_border(
     accent: egui::Color32,
     invalid: bool,
 ) {
+    paint_field_border_at(ui, resp.rect, resp.has_focus(), accent, invalid);
+}
+
+fn paint_field_border_at(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    has_focus: bool,
+    accent: egui::Color32,
+    invalid: bool,
+) {
     let color = if invalid {
         theme::current().error
-    } else if resp.has_focus() {
+    } else if has_focus {
         accent
     } else {
         return;
@@ -2680,47 +2772,29 @@ fn paint_field_border(
     // StrokeKind::Middle: the stroke is centered on the rect boundary.
     let half_w = FOCUS_RING_W * 0.5;
     ui.painter().rect_stroke(
-        resp.rect.expand(FOCUS_RING_GAP + half_w),
+        rect.expand(FOCUS_RING_GAP + half_w),
         egui::CornerRadius::same(FOCUS_RING_ROUNDING),
         egui::Stroke::new(FOCUS_RING_W, color),
         egui::StrokeKind::Middle,
     );
 }
 
-/// Validation error rows (or hint when no errors). Must follow `ui.end_row()` for the field.
+/// Validation error lines (or hint when no errors).  Called from the value
+/// column, directly under the widget — not as a separate Grid row.
 fn render_field_feedback(ui: &mut egui::Ui, errors: &[String], hint: Option<&str>) {
     if !errors.is_empty() {
-        ui.label("");
-        egui::Frame::default()
-            .inner_margin(egui::Margin {
-                left: FOCUS_RING_PAD as i8,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for err in errors {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new(err)
-                                .size(HINT_FONT_PX)
-                                .color(theme::current().error),
-                        ));
-                    }
-                });
-            });
-        ui.end_row();
+        for err in errors {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(err)
+                        .size(HINT_FONT_PX)
+                        .color(theme::current().error),
+                )
+                .wrap(),
+            );
+        }
     } else if let Some(hint) = hint {
-        ui.label("");
-        egui::Frame::default()
-            .inner_margin(egui::Margin {
-                left: FOCUS_RING_PAD as i8,
-                ..Default::default()
-            })
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(
-                    egui::RichText::new(hint).size(HINT_FONT_PX),
-                ));
-            });
-        ui.end_row();
+        ui.add(egui::Label::new(egui::RichText::new(hint).size(HINT_FONT_PX)).wrap());
     }
 }
 

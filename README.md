@@ -205,6 +205,8 @@ Full schema reference, widget guide, theming, and localization:
 
 **https://emotiongraphics.jp/docs/ref/settings/**
 
+`multiline` fields use `rows` as the visible height (default 4). Longer values scroll inside the widget; they do not stretch the form.
+
 ### `segmented_control` and `type`
 
 `segmented_control` reads and writes `string` values by default (`type` omitted or
