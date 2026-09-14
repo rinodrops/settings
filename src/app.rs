@@ -1305,50 +1305,52 @@ fn render_multiline(
     let mut buf = current.clone();
     let rows = field.rows.unwrap_or(4);
     let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
-    let row_h = ui.text_style_height(&egui::TextStyle::Body);
-    let h = row_h * rows as f32 + TEXTEDIT_MARGIN_Y;
+    let font_id = egui::FontId::new(FIELD_FONT_PX, egui::FontFamily::Proportional);
+    let row_h = ui.fonts(|f| f.row_height(&font_id));
+    let inner_h = row_h * rows as f32 + TEXTEDIT_MARGIN_Y;
+    let border = FIELD_BORDER_W_IDLE;
+    let outer_h = inner_h + 2.0 * border;
+
+    // Claim exactly the schema height.  Grid cells extend `max_rect` to the
+    // panel bottom; a Frame + ScrollArea sized from available height would
+    // otherwise eat leftover `content_height` and push the next Grid row
+    // (the hint) down.  `new_child` paints into this rect without allocating
+    // a second time in the parent.
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, outer_h), egui::Sense::hover());
 
     let mut changed = false;
     let mut focused = false;
     let pal = theme::current();
     let cr = egui::CornerRadius::same(FIELD_ROUNDING);
-    let idle_stroke = egui::Stroke::new(FIELD_BORDER_W_IDLE, pal.field_border);
-    // Idle fill + border live on this outer frame so they do not scroll away with
-    // the inner TextEdit.  The TextEdit itself is frameless for the same reason.
-    // inner_margin keeps glyphs inside the 1 px inside-stroke; the stroke is
-    // painted again after the content so mid-line clips cannot cover the border.
-    let viewport = egui::Frame::NONE
-        .inner_margin(egui::Margin::same(FIELD_BORDER_W_IDLE as i8))
-        .fill(pal.surface)
-        .stroke(idle_stroke)
-        .corner_radius(cr)
-        .show(ui, |ui| {
-            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-            ui.set_min_size(egui::vec2(w, h));
-            ui.set_max_size(egui::vec2(w, h));
-            egui::ScrollArea::vertical()
-                .id_salt(("multiline", key_path))
-                .max_height(h)
-                .min_scrolled_height(h)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let resp = ui.add(
-                        egui::TextEdit::multiline(&mut buf)
-                            .frame(false)
-                            .desired_rows(rows)
-                            .desired_width(ui.available_width()),
-                    );
-                    changed = resp.changed();
-                    focused = resp.has_focus();
-                });
-        });
-    ui.painter().rect_stroke(
-        viewport.response.rect,
-        cr,
-        idle_stroke,
-        egui::StrokeKind::Inside,
-    );
-    paint_field_border_at(ui, viewport.response.rect, focused, accent, invalid);
+    let idle_stroke = egui::Stroke::new(border, pal.field_border);
+
+    ui.painter().rect_filled(rect, cr, pal.surface);
+    ui.painter().rect_stroke(rect, cr, idle_stroke, egui::StrokeKind::Inside);
+
+    let inner = rect.shrink(border);
+    {
+        let mut inner_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+        inner_ui.set_clip_rect(inner.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical()
+            .id_salt(("multiline", key_path))
+            .max_height(inner.height())
+            .min_scrolled_height(inner.height())
+            .auto_shrink([false, false])
+            .show(&mut inner_ui, |ui| {
+                let resp = ui.add(
+                    egui::TextEdit::multiline(&mut buf)
+                        .frame(false)
+                        .desired_rows(rows)
+                        .desired_width(ui.available_width()),
+                );
+                changed = resp.changed();
+                focused = resp.has_focus();
+            });
+    }
+
+    // Re-paint the idle stroke so mid-line clips cannot cover the border.
+    ui.painter().rect_stroke(rect, cr, idle_stroke, egui::StrokeKind::Inside);
+    paint_field_border_at(ui, rect, focused, accent, invalid);
     if changed {
         config.set_str(key_path, &buf);
     }
