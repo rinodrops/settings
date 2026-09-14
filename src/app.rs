@@ -1311,13 +1311,19 @@ fn render_multiline(
     let mut changed = false;
     let mut focused = false;
     let pal = theme::current();
+    let cr = egui::CornerRadius::same(FIELD_ROUNDING);
+    let idle_stroke = egui::Stroke::new(FIELD_BORDER_W_IDLE, pal.field_border);
     // Idle fill + border live on this outer frame so they do not scroll away with
     // the inner TextEdit.  The TextEdit itself is frameless for the same reason.
+    // inner_margin keeps glyphs inside the 1 px inside-stroke; the stroke is
+    // painted again after the content so mid-line clips cannot cover the border.
     let viewport = egui::Frame::NONE
+        .inner_margin(egui::Margin::same(FIELD_BORDER_W_IDLE as i8))
         .fill(pal.surface)
-        .stroke(egui::Stroke::new(FIELD_BORDER_W_IDLE, pal.field_border))
-        .corner_radius(egui::CornerRadius::same(FIELD_ROUNDING))
+        .stroke(idle_stroke)
+        .corner_radius(cr)
         .show(ui, |ui| {
+            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
             ui.set_min_size(egui::vec2(w, h));
             ui.set_max_size(egui::vec2(w, h));
             egui::ScrollArea::vertical()
@@ -1336,6 +1342,12 @@ fn render_multiline(
                     focused = resp.has_focus();
                 });
         });
+    ui.painter().rect_stroke(
+        viewport.response.rect,
+        cr,
+        idle_stroke,
+        egui::StrokeKind::Inside,
+    );
     paint_field_border_at(ui, viewport.response.rect, focused, accent, invalid);
     if changed {
         config.set_str(key_path, &buf);
