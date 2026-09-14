@@ -1310,10 +1310,14 @@ fn render_multiline(
 
     let mut changed = false;
     let mut focused = false;
-    let viewport = ui.allocate_ui_with_layout(
-        egui::vec2(w, h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
+    let pal = theme::current();
+    // Idle fill + border live on this outer frame so they do not scroll away with
+    // the inner TextEdit.  The TextEdit itself is frameless for the same reason.
+    let viewport = egui::Frame::NONE
+        .fill(pal.surface)
+        .stroke(egui::Stroke::new(FIELD_BORDER_W_IDLE, pal.field_border))
+        .corner_radius(egui::CornerRadius::same(FIELD_ROUNDING))
+        .show(ui, |ui| {
             ui.set_min_size(egui::vec2(w, h));
             ui.set_max_size(egui::vec2(w, h));
             egui::ScrollArea::vertical()
@@ -1324,15 +1328,14 @@ fn render_multiline(
                 .show(ui, |ui| {
                     let resp = ui.add(
                         egui::TextEdit::multiline(&mut buf)
+                            .frame(false)
                             .desired_rows(rows)
                             .desired_width(ui.available_width()),
                     );
                     changed = resp.changed();
                     focused = resp.has_focus();
-                    resp
                 });
-        },
-    );
+        });
     paint_field_border_at(ui, viewport.response.rect, focused, accent, invalid);
     if changed {
         config.set_str(key_path, &buf);
