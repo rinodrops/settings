@@ -2699,11 +2699,14 @@ fn render_field_feedback(ui: &mut egui::Ui, errors: &[String], hint: Option<&str
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     for err in errors {
-                        ui.add(egui::Label::new(
-                            egui::RichText::new(err)
-                                .size(HINT_FONT_PX)
-                                .color(theme::current().error),
-                        ));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(err)
+                                    .size(HINT_FONT_PX)
+                                    .color(theme::current().error),
+                            )
+                            .wrap(),
+                        );
                     }
                 });
             });
@@ -2716,9 +2719,9 @@ fn render_field_feedback(ui: &mut egui::Ui, errors: &[String], hint: Option<&str
                 ..Default::default()
             })
             .show(ui, |ui| {
-                ui.add(egui::Label::new(
-                    egui::RichText::new(hint).size(HINT_FONT_PX),
-                ));
+                ui.add(
+                    egui::Label::new(egui::RichText::new(hint).size(HINT_FONT_PX)).wrap(),
+                );
             });
         ui.end_row();
     }
