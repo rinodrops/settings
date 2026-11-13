@@ -1303,6 +1303,20 @@ fn render_widget_inner(
         WidgetKind::KeyValueMap => {
             render_key_value_map(ui, field, key_path, config, accent);
         }
+
+        WidgetKind::RecordList => {
+            render_record_list(
+                ui,
+                field,
+                key_path,
+                schema,
+                validation,
+                config,
+                show_secrets,
+                pending,
+                accent,
+            );
+        }
     }
 }
 
@@ -2299,6 +2313,133 @@ fn render_hotkey(
     });
 }
 
+/// Ordered list of records. Each row renders `item_fields` with existing widgets.
+fn render_record_list(
+    ui: &mut egui::Ui,
+    field: &Field,
+    key_path: &str,
+    schema: &Schema,
+    validation: &mut ValidationEngine,
+    config: &mut ConfigStore,
+    show_secrets: &mut HashMap<String, bool>,
+    pending: &mut PendingFilePick,
+    accent: egui::Color32,
+) {
+    let mut len = config.record_len(key_path);
+    let mut move_pair: Option<(usize, usize)> = None;
+    let mut remove_at: Option<usize> = None;
+
+    for index in 0..len {
+        let record = format!("{key_path}[{index}]");
+        let frame = egui::Frame::group(ui.style());
+        let (_, dropped) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+            ui.horizontal(|ui| {
+                let _ = ui.dnd_drag_source(egui::Id::new((&record, "drag")), index, |ui| {
+                    ui.label("≡");
+                });
+                ui.label(format!("{}", index + 1));
+                if ui.button("✕").clicked() {
+                    remove_at = Some(index);
+                }
+            });
+            for item in &field.item_fields {
+                let item_path = format!("{record}.{}", item.key);
+                render_field(
+                    ui,
+                    item,
+                    &item_path,
+                    schema,
+                    validation,
+                    &[],
+                    config,
+                    show_secrets,
+                    pending,
+                    accent,
+                );
+            }
+            show_record_preview(ui, field, &record, config);
+        });
+        if let Some(from) = dropped {
+            if *from != index {
+                move_pair = Some((*from, index));
+            }
+        }
+    }
+
+    if let Some(index) = remove_at {
+        config.record_remove(key_path, index);
+        len = config.record_len(key_path);
+    }
+    if let Some((from, to)) = move_pair {
+        config.record_move(key_path, from, to);
+    }
+    if ui.button("+").clicked() {
+        if let Some(index) = config.record_push(key_path) {
+            for item in &field.item_fields {
+                if let Some(initial) = item.initial {
+                    let path = format!("{key_path}[{index}].{}", item.key);
+                    config.set_number(&path, initial, NumberRepr::from_step(item.step.unwrap_or(1.0)));
+                }
+            }
+        }
+    }
+    let _ = len;
+}
+
+/// Ask the host for a preview image when the record's values changed.
+fn show_record_preview(ui: &mut egui::Ui, field: &Field, record: &str, config: &ConfigStore) {
+    let Some(callback) = field.on_change.clone() else {
+        return;
+    };
+    let values: Vec<(String, String)> = field
+        .item_fields
+        .iter()
+        .map(|item| {
+            let path = format!("{record}.{}", item.key);
+            let text = config
+                .get_str(&path)
+                .map(str::to_owned)
+                .or_else(|| config.get_number(&path).map(|n| n.to_string()))
+                .unwrap_or_default();
+            (item.key.clone(), text)
+        })
+        .collect();
+    let fingerprint = format!("{callback}:{values:?}");
+    let seen_id = egui::Id::new(("record_preview", record));
+    let previous = ui.data(|d| d.get_temp::<String>(seen_id));
+    if previous.as_deref() != Some(fingerprint.as_str()) {
+        ui.data_mut(|d| d.insert_temp(seen_id, fingerprint));
+        let image = crate::hooks::on_change(&crate::hooks::Change {
+            callback,
+            record: record.to_owned(),
+            values,
+        });
+        if let Some(image) = image {
+            if image.width > 0
+                && image.height > 0
+                && image.rgba.len() == image.width * image.height * 4
+            {
+                let color = egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width, image.height],
+                    &image.rgba,
+                );
+                let texture = ui.ctx().load_texture(
+                    format!("preview-{record}"),
+                    color,
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.data_mut(|d| d.insert_temp(egui::Id::new(("record_tex", record)), texture));
+            }
+        }
+    }
+    if let Some(texture) = ui.data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new(("record_tex", record)))) {
+        let size = texture.size_vec2();
+        let height = 96.0;
+        let width = size.x * height / size.y.max(1.0);
+        ui.image((texture.id(), egui::vec2(width, height)));
+    }
+}
+
 /// Renders a numeric field as either a `Slider` (`use_slider=true`) or a `DragValue`.
 /// Reads / writes the value as a TOML float. Falls back to `default` when the key
 /// is absent and `default` is set; otherwise starts at `min` (or 0).
@@ -2315,7 +2456,10 @@ fn render_numeric(
     let step  = field.step.unwrap_or(1.0);
     let suffix = field.suffix.as_deref().unwrap_or("");
 
-    let mut val: f64 = config.get_number(key_path).unwrap_or(min);
+    let mut val: f64 = config
+        .get_number(key_path)
+        .or(field.initial)
+        .unwrap_or(min);
 
     // Target height: same as singleline TextEdit.
     let row_h  = ui.text_style_height(&egui::TextStyle::Body);
@@ -2323,7 +2467,12 @@ fn render_numeric(
     let h = (row_h + 2.0 * btn_y).max(ui.spacing().interact_size.y);
 
     let pad_x = 8.0; // match text_input left/right padding
-    let w = clamped_width(ui.available_width(), field.min_width, field.max_width);
+    let reset_w = if field.reset { 36.0 } else { 0.0 };
+    let w = clamped_width(
+        ui.available_width() - reset_w,
+        field.min_width,
+        field.max_width,
+    );
 
     // Pre-compute slider track width.
     let track_w = if use_slider {
@@ -2411,6 +2560,13 @@ fn render_numeric(
 
     if resp.changed() {
         config.set_number(key_path, val, NumberRepr::from_step(step));
+    }
+    if field.reset {
+        if let Some(initial) = field.initial {
+            if ui.button("↺").on_hover_text("Reset").clicked() {
+                config.set_number(key_path, initial, NumberRepr::from_step(step));
+            }
+        }
     }
 }
 
