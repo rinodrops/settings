@@ -7,6 +7,10 @@ name = "settings"
 version = "0.2.6"
 edition = "2024"
 
+[lib]
+name = "settings"
+path = "src/lib.rs"
+
 [[bin]]
 name = "settings"
 path = "src/main.rs"

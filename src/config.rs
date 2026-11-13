@@ -64,6 +64,21 @@ impl NumberRepr {
     }
 }
 
+/// Split `array[index].key` into its three parts. Plain dotted paths return `None`.
+fn split_index(path: &str) -> Option<(&str, usize, &str)> {
+    let open = path.find('[')?;
+    let close = path.find(']')?;
+    if close < open {
+        return None;
+    }
+    let index: usize = path[open + 1..close].parse().ok()?;
+    let key = path[close + 1..].strip_prefix('.')?;
+    if key.is_empty() || key.contains('[') {
+        return None;
+    }
+    Some((&path[..open], index, key))
+}
+
 fn number_item(value: f64, repr: NumberRepr) -> Item {
     match repr {
         NumberRepr::WholeAsInteger if value.fract() == 0.0 && value.is_finite() => {
@@ -177,6 +192,9 @@ impl ConfigStore {
 
     /// Get a string value by dot-separated path.
     pub fn get_str<'a>(&'a self, path: &str) -> Option<&'a str> {
+        if let Some((array, index, key)) = split_index(path) {
+            return self.record_value(array, index, key).and_then(|v| v.as_str());
+        }
         self.get_item(path)?.as_str()
     }
 
@@ -187,8 +205,123 @@ impl ConfigStore {
 
     /// Get a numeric (float or integer) value by dot-separated path.
     pub fn get_number(&self, path: &str) -> Option<f64> {
+        if let Some((array, index, key)) = split_index(path) {
+            let value = self.record_value(array, index, key)?;
+            return value
+                .as_float()
+                .or_else(|| value.as_integer().map(|i| i as f64));
+        }
         let item = self.get_item(path)?;
         item.as_float().or_else(|| item.as_integer().map(|i| i as f64))
+    }
+
+    /// Number of records in the array at `path`. Missing arrays have length 0.
+    pub fn record_len(&self, path: &str) -> usize {
+        self.get_item(path)
+            .and_then(|item| item.as_array())
+            .map(|array| array.len())
+            .unwrap_or(0)
+    }
+
+    /// Append an empty record. Creates the array when it is absent.
+    pub fn record_push(&mut self, path: &str) -> Option<usize> {
+        self.ensure_array(path)?;
+        let len = {
+            let array = self.get_item_mut(path)?.as_array_mut()?;
+            array.push(toml_edit::InlineTable::new());
+            array.len()
+        };
+        self.dirty = true;
+        Some(len - 1)
+    }
+
+    /// Remove the record at `index`.
+    pub fn record_remove(&mut self, path: &str, index: usize) -> bool {
+        let removed = {
+            let Some(array) = self.get_item_mut(path).and_then(|item| item.as_array_mut()) else {
+                return false;
+            };
+            if index >= array.len() {
+                return false;
+            }
+            array.remove(index);
+            true
+        };
+        if removed {
+            self.dirty = true;
+        }
+        removed
+    }
+
+    /// Move the record at `from` so that it occupies `to`.
+    pub fn record_move(&mut self, path: &str, from: usize, to: usize) -> bool {
+        if from == to {
+            return false;
+        }
+        let moved = {
+            let Some(array) = self.get_item_mut(path).and_then(|item| item.as_array_mut()) else {
+                return false;
+            };
+            if from >= array.len() || to >= array.len() {
+                return false;
+            }
+            let value = array.remove(from);
+            array.insert(to, value);
+            true
+        };
+        if moved {
+            self.dirty = true;
+        }
+        moved
+    }
+
+    fn record_value(&self, array: &str, index: usize, key: &str) -> Option<&toml_edit::Value> {
+        self.get_item(array)?
+            .as_array()?
+            .get(index)?
+            .as_inline_table()?
+            .get(key)
+    }
+
+    fn ensure_array(&mut self, path: &str) -> Option<()> {
+        if self.get_item(path).and_then(|item| item.as_array()).is_some() {
+            return Some(());
+        }
+        self.set_item(path, toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())))
+            .then_some(())
+    }
+
+    fn set_record_value(&mut self, array: &str, index: usize, key: &str, value: toml_edit::Value) -> bool {
+        if self.ensure_array(array).is_none() {
+            return false;
+        }
+        let wrote = {
+            let Some(list) = self.get_item_mut(array).and_then(|item| item.as_array_mut()) else {
+                return false;
+            };
+            while list.len() <= index {
+                list.push(toml_edit::InlineTable::new());
+            }
+            let Some(toml_edit::Value::InlineTable(table)) = list.get_mut(index) else {
+                return false;
+            };
+            table.insert(key, value);
+            true
+        };
+        if wrote {
+            self.dirty = true;
+        }
+        wrote
+    }
+
+    fn get_item_mut(&mut self, path: &str) -> Option<&mut Item> {
+        let mut parts = path.split('.');
+        let first = parts.next()?;
+        let mut item = self.doc.get_mut(first)?;
+        for key in parts {
+            item = item.as_table_like_mut()?.get_mut(key)?;
+        }
+        Some(item)
     }
 
     // -----------------------------------------------------------------------
@@ -196,6 +329,9 @@ impl ConfigStore {
 
     /// Set a string value by dot-separated path, creating intermediate tables as needed.
     pub fn set_str(&mut self, path: &str, value: &str) -> bool {
+        if let Some((array, index, key)) = split_index(path) {
+            return self.set_record_value(array, index, key, toml_edit::Value::from(value));
+        }
         self.set_item(path, toml_edit::value(value))
     }
 
@@ -207,6 +343,12 @@ impl ConfigStore {
     /// Set a numeric value by dot-separated path, creating intermediate tables as needed.
     /// Writes a float literal unless `repr` requests integers for whole values.
     pub fn set_number(&mut self, path: &str, value: f64, repr: NumberRepr) -> bool {
+        if let Some((array, index, key)) = split_index(path) {
+            let Some(toml_edit::Item::Value(stored)) = Some(number_item(value, repr)) else {
+                return false;
+            };
+            return self.set_record_value(array, index, key, stored);
+        }
         self.set_item(path, number_item(value, repr))
     }
 
@@ -495,6 +637,30 @@ mod tests {
     }
 
     #[test]
+    fn record_roundtrip_and_reorder() {
+        let path = std::env::temp_dir().join(format!(
+            "settings_record_test_{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "").unwrap();
+        let mut store = ConfigStore::load(&path).unwrap();
+        assert_eq!(store.record_push("pets"), Some(0));
+        assert!(store.set_str("pets[0].name", "Mikan"));
+        assert!(store.set_number("pets[0].hue", 38.0, NumberRepr::WholeAsInteger));
+        assert_eq!(store.record_push("pets"), Some(1));
+        assert!(store.set_str("pets[1].name", "Koke"));
+        assert!(store.record_move("pets", 1, 0));
+        assert_eq!(store.get_str("pets[0].name"), Some("Koke"));
+        assert_eq!(store.get_number("pets[1].hue"), Some(38.0));
+        assert!(store.record_remove("pets", 1));
+        assert_eq!(store.record_len("pets"), 1);
+        store.save().unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("Koke"));
+        let _ = std::fs::remove_file(path);
+        let _ = store;
+    }
+
     fn set_number_writes_integer_literal() {
         let path = std::env::temp_dir().join(format!(
             "settings_number_repr_test_{}.toml",

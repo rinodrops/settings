@@ -846,6 +846,7 @@ fn widget_kind_name(widget: &WidgetKind) -> &'static str {
         WidgetKind::FilePath => "file_path",
         WidgetKind::ColorPicker => "color_picker",
         WidgetKind::KeyValueMap => "key_value_map",
+        WidgetKind::RecordList => "record_list",
     }
 }
 
@@ -1126,6 +1127,20 @@ pub struct Field {
     pub key_label: Option<LocalizedString>,
     /// Header text for the value column. Defaults to `"Value"`.
     pub value_label: Option<LocalizedString>,
+
+    // --- record_list ---
+    /// Fields that make up one row of a `record_list`. Keys are relative to the row.
+    #[serde(default)]
+    pub item_fields: Vec<Field>,
+    /// Name of a host callback invoked when a value in this widget changes.
+    pub on_change: Option<String>,
+
+    // --- slider / drag_value ---
+    /// Value restored by the reset button. Also the value shown when the key is absent.
+    pub initial: Option<f64>,
+    /// Show a button that writes `initial` back into the field.
+    #[serde(default)]
+    pub reset: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1170,8 @@ pub enum WidgetKind {
     ColorPicker,
     /// Editable table of string key → string value pairs.
     KeyValueMap,
+    /// Ordered list of records. Each row is the `item_fields` widgets.
+    RecordList,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Clone, Default)]
