@@ -107,6 +107,7 @@ pub(crate) fn render(
         }
     });
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
         for color in &field.colors {
             let selected = chosen.is_some_and(|chosen| chosen.id == color.id);
             if swatch(ui, color, selected, accent).clicked() {
@@ -180,17 +181,22 @@ fn swatch(
     } else {
         Color32::WHITE
     };
-    let response = ui
-        .add_sized(
-            [18.0, 20.0],
-            egui::Button::new("")
-                .fill(fill)
-                .corner_radius(4)
-                .stroke(Stroke::new(1.0, theme::current().field_border)),
-        )
-        .on_hover_text(color.label.get());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 23.0), egui::Sense::click());
+    let response = response.on_hover_text(color.label.get());
+    let border = if selected || response.hovered() {
+        accent
+    } else {
+        theme::current().field_border
+    };
+    ui.painter().rect(
+        rect,
+        4,
+        fill,
+        Stroke::new(if selected { 1.5 } else { 1.0 }, border),
+        egui::StrokeKind::Inside,
+    );
     if selected {
-        let center = response.rect.center();
+        let center = rect.center();
         let stroke = Stroke::new(1.5, check);
         ui.painter().line_segment(
             [
@@ -206,12 +212,6 @@ fn swatch(
             ],
             stroke,
         );
-        ui.painter().rect_stroke(
-            response.rect,
-            4,
-            Stroke::new(1.0, accent),
-            egui::StrokeKind::Inside,
-        );
     }
     response.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -223,7 +223,7 @@ fn swatch(
     });
     if response.has_focus() {
         ui.painter().rect_stroke(
-            response.rect.expand(2.0),
+            rect.expand(1.0),
             5,
             Stroke::new(1.5, accent),
             egui::StrokeKind::Outside,

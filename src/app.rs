@@ -2406,9 +2406,10 @@ fn render_record_list(
                 egui::Vec2::ZERO
             };
             let inline_preview = preview.x > 0.0 && ui.available_width() >= preview.x + gap + 285.0;
-            let editor = egui::Id::new(("palette_editor", key_path, &stable_id));
+            let row_id = (key_path, stable_id.as_str());
+            let editor = egui::Id::new(("palette_editor", row_id));
             let info = egui::UiStackInfo::default().with_tag_value("palette_editor", editor);
-            ui.scope_builder(egui::UiBuilder::new().id_salt(&stable_id).ui_stack_info(info), |ui| ui.horizontal(|ui| {
+            ui.scope_builder(egui::UiBuilder::new().id_salt(row_id).ui_stack_info(info), |ui| ui.horizontal(|ui| {
                 let fields_w = if inline_preview {
                     (ui.available_width() - preview.x - gap).max(160.0)
                 } else {
@@ -2416,7 +2417,7 @@ fn render_record_list(
                 };
                 ui.vertical(|ui| {
                     ui.set_max_width(fields_w);
-                    egui::Grid::new(("record_fields", &stable_id))
+                    egui::Grid::new(("record_fields", row_id))
                         .num_columns(2)
                         .min_col_width(60.0)
                         .spacing([8.0, 4.0])
