@@ -181,7 +181,7 @@ fn swatch(
     } else {
         Color32::WHITE
     };
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 23.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(20.0), egui::Sense::click());
     let response = response.on_hover_text(color.label.get());
     let border = if selected || response.hovered() {
         accent

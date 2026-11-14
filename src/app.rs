@@ -618,40 +618,55 @@ fn show_flat_fields(
         .id_salt(("flat_fields", tab_id))
         .max_height(max_height)
         .show(ui, |ui| {
-        ui.add_space(FOCUS_RING_PAD);
-        egui::Grid::new(("flat_fields", tab_id))
-            .num_columns(2)
-            .min_col_width(120.0)
-            .spacing([8.0, 8.0])
-            .show(ui, |ui| {
-                for field in fields {
-                    if field.widget == WidgetKind::Separator {
-                        if field.label.get().is_empty() {
-                            render_separator_row(ui);
-                        } else {
-                            ui.strong(field.label.get());
+            ui.add_space(FOCUS_RING_PAD);
+            let full_width = |field: &Field| {
+                (field.widget == WidgetKind::RecordList && field.record_title_key.is_some())
+                    || (field.widget == WidgetKind::Separator && !field.label.get().is_empty())
+            };
+            let mut remaining = fields;
+            let mut grid_index = 0;
+            while let Some(field) = remaining.first() {
+                if full_width(field) {
+                    let heading = egui::RichText::new(field.label.get())
+                        .family(egui::FontFamily::Name("bold".into()));
+                    if !field.label.get().is_empty() {
+                        ui.label(heading);
+                    }
+                    if field.widget == WidgetKind::RecordList {
+                        render_record_list(
+                            ui, field, &field.key, schema, validation, config, show_secrets,
+                            pending, accent,
+                        );
+                    }
+                    ui.add_space(6.0);
+                    remaining = &remaining[1..];
+                    continue;
+                }
+
+                let end = remaining.iter().position(full_width).unwrap_or(remaining.len());
+                egui::Grid::new(("flat_fields", tab_id, grid_index))
+                    .num_columns(2)
+                    .min_col_width(120.0)
+                    .spacing([8.0, 8.0])
+                    .show(ui, |ui| {
+                        for field in &remaining[..end] {
+                            if field.widget == WidgetKind::Separator {
+                                render_separator_row(ui);
+                                continue;
+                            }
+                            let key_path = field.key.as_str();
+                            let errors = validation.field_errors(schema, field, key_path, config);
+                            render_field(
+                                ui, field, key_path, schema, validation, &errors, config,
+                                show_secrets, pending, accent,
+                            );
                             ui.end_row();
                         }
-                        continue;
-                    }
-                    let key_path = field.key.as_str();
-                    let errors = validation.field_errors(schema, field, key_path, config);
-                    render_field(
-                        ui,
-                        field,
-                        key_path,
-                        schema,
-                        validation,
-                        &errors,
-                        config,
-                        show_secrets,
-                        pending,
-                        accent,
-                    );
-                    ui.end_row();
-                }
-            });
-    });
+                    });
+                grid_index += 1;
+                remaining = &remaining[end..];
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -2383,14 +2398,14 @@ fn render_record_list(
                         remove_at = Some(index);
                     }
                     if compact {
-                        if ui.add_enabled(index + 1 < len, egui::Button::new("↓").small())
-                            .on_hover_text(localized("Move down", "下へ移動")).clicked()
-                        {
+                        let down = reorder_button(ui, index + 1 < len, "↓",
+                            localized("Move down", "下へ移動"), accent);
+                        if down.clicked() {
                             move_pair = Some((index, index + 1));
                         }
-                        if ui.add_enabled(index > 0, egui::Button::new("↑").small())
-                            .on_hover_text(localized("Move up", "上へ移動")).clicked()
-                        {
+                        let up = reorder_button(ui, index > 0, "↑",
+                            localized("Move up", "上へ移動"), accent);
+                        if up.clicked() {
                             move_pair = Some((index, index - 1));
                         }
                     }
@@ -2489,6 +2504,28 @@ fn render_record_list(
         }
     }
     ui.data_mut(|data| data.insert_temp(expanded_slot, expanded.unwrap_or_default()));
+}
+
+/// Compact, borderless action with a visible keyboard focus indicator.
+fn reorder_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    arrow: &str,
+    label: &str,
+    accent: egui::Color32,
+) -> egui::Response {
+    let response = ui.add_enabled(
+        enabled,
+        egui::Button::new(arrow).frame(false).min_size(egui::vec2(24.0, 22.0)),
+    );
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            response.rect, FIELD_ROUNDING, egui::Stroke::new(1.5, accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.on_hover_text(label)
 }
 
 /// Display size of a record preview. Height stays 96px; width follows the image.
