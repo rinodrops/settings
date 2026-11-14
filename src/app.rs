@@ -2342,22 +2342,47 @@ fn render_record_list(
                     remove_at = Some(index);
                 }
             });
-            for item in &field.item_fields {
-                let item_path = format!("{record}.{}", item.key);
-                render_field(
-                    ui,
-                    item,
-                    &item_path,
-                    schema,
-                    validation,
-                    &[],
-                    config,
-                    show_secrets,
-                    pending,
-                    accent,
-                );
-            }
-            show_record_preview(ui, field, &record, config);
+            ui.horizontal(|ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let preview = if field.on_change.is_some() {
+                    preview_display_size(ui, &record)
+                } else {
+                    egui::Vec2::ZERO
+                };
+                let fields_w = if preview.x > 0.0 {
+                    (ui.available_width() - preview.x - gap).max(160.0)
+                } else {
+                    ui.available_width()
+                };
+                ui.vertical(|ui| {
+                    ui.set_max_width(fields_w);
+                    egui::Grid::new(("record_fields", record.clone()))
+                        .num_columns(2)
+                        .min_col_width(72.0)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            for item in &field.item_fields {
+                                let item_path = format!("{record}.{}", item.key);
+                                render_field(
+                                    ui,
+                                    item,
+                                    &item_path,
+                                    schema,
+                                    validation,
+                                    &[],
+                                    config,
+                                    show_secrets,
+                                    pending,
+                                    accent,
+                                );
+                                ui.end_row();
+                            }
+                        });
+                });
+                if preview.x > 0.0 {
+                    show_record_preview(ui, field, &record, config);
+                }
+            });
         });
         if let Some(from) = dropped {
             if *from != index {
@@ -2384,6 +2409,17 @@ fn render_record_list(
         }
     }
     let _ = len;
+}
+
+/// Display size of a record preview. Height stays 96px; width follows the image.
+fn preview_display_size(ui: &egui::Ui, record: &str) -> egui::Vec2 {
+    let height = 96.0;
+    ui.data(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new(("record_tex", record))))
+        .map(|texture| {
+            let size = texture.size_vec2();
+            egui::vec2(size.x * height / size.y.max(1.0), height)
+        })
+        .unwrap_or(egui::vec2(height, height))
 }
 
 /// Ask the host for a preview image when the record's values changed.
@@ -2467,7 +2503,12 @@ fn render_numeric(
     let h = (row_h + 2.0 * btn_y).max(ui.spacing().interact_size.y);
 
     let pad_x = 8.0; // match text_input left/right padding
-    let reset_w = if field.reset { 36.0 } else { 0.0 };
+    let show_reset = field.reset && field.initial.is_some();
+    let reset_w = if show_reset {
+        36.0 + ui.spacing().item_spacing.x
+    } else {
+        0.0
+    };
     let w = clamped_width(
         ui.available_width() - reset_w,
         field.min_width,
@@ -2490,86 +2531,92 @@ fn render_numeric(
         0.0
     };
 
-    let resp = ui.scope(|ui| {
-        let bg    = ui.visuals().extreme_bg_color;
-        let white = theme::current().surface;
-        ui.spacing_mut().button_padding.x          = pad_x;
-        ui.visuals_mut().widgets.inactive.weak_bg_fill = bg;
-        ui.visuals_mut().widgets.hovered.weak_bg_fill  = bg;
-        ui.visuals_mut().widgets.active.weak_bg_fill   = bg;
+    let mut draw_control = |ui: &mut egui::Ui| {
+        let resp = ui.scope(|ui| {
+            let bg    = ui.visuals().extreme_bg_color;
+            let white = theme::current().surface;
+            ui.spacing_mut().button_padding.x          = pad_x;
+            ui.visuals_mut().widgets.inactive.weak_bg_fill = bg;
+            ui.visuals_mut().widgets.hovered.weak_bg_fill  = bg;
+            ui.visuals_mut().widgets.active.weak_bg_fill   = bg;
 
-        if use_slider {
-            ui.spacing_mut().slider_width = track_w;
-            // trailing fill uses selection.bg_fill for the left track portion.
-            ui.visuals_mut().selection.bg_fill = accent;
-            // handle: white circle with accent border.
-            let border = egui::Stroke::new(2.0, accent);
-            ui.visuals_mut().widgets.inactive.bg_fill = white;
-            ui.visuals_mut().widgets.inactive.fg_stroke = border;
-            ui.visuals_mut().widgets.hovered.bg_fill = white;
-            ui.visuals_mut().widgets.hovered.fg_stroke = egui::Stroke::new(2.5, accent);
-            ui.visuals_mut().widgets.active.bg_fill = white;
-            ui.visuals_mut().widgets.active.fg_stroke = egui::Stroke::new(2.5, accent);
+            if use_slider {
+                ui.spacing_mut().slider_width = track_w;
+                // trailing fill uses selection.bg_fill for the left track portion.
+                ui.visuals_mut().selection.bg_fill = accent;
+                // handle: white circle with accent border.
+                let border = egui::Stroke::new(2.0, accent);
+                ui.visuals_mut().widgets.inactive.bg_fill = white;
+                ui.visuals_mut().widgets.inactive.fg_stroke = border;
+                ui.visuals_mut().widgets.hovered.bg_fill = white;
+                ui.visuals_mut().widgets.hovered.fg_stroke = egui::Stroke::new(2.5, accent);
+                ui.visuals_mut().widgets.active.bg_fill = white;
+                ui.visuals_mut().widgets.active.fg_stroke = egui::Stroke::new(2.5, accent);
 
-            let decimals = if step >= 1.0 {
-                0
+                let decimals = if step >= 1.0 {
+                    0
+                } else {
+                    ((-step.abs().log10()).ceil() as usize).min(10)
+                };
+                let slider = egui::Slider::new(&mut val, min..=max)
+                    .step_by(step)
+                    .max_decimals(decimals)
+                    .suffix(suffix)
+                    .trailing_fill(true);
+                ui.add(slider)
             } else {
-                ((-step.abs().log10()).ceil() as usize).min(10)
-            };
-            let slider = egui::Slider::new(&mut val, min..=max)
-                .step_by(step)
-                .max_decimals(decimals)
-                .suffix(suffix)
-                .trailing_fill(true);
-            ui.add(slider)
-        } else {
-            let dv = egui::DragValue::new(&mut val)
-                .range(min..=max)
-                .speed(step)
-                .suffix(suffix);
-            ui.add_sized([w, h], dv)
+                let dv = egui::DragValue::new(&mut val)
+                    .range(min..=max)
+                    .speed(step)
+                    .suffix(suffix);
+                ui.add_sized([w, h], dv)
+            }
+        }).inner;
+
+        if !use_slider {
+            paint_field_border(ui, &resp, accent, false);
         }
-    }).inner;
 
-    if !use_slider {
-        paint_field_border(ui, &resp, accent, false);
-    }
+        // Draw the right-side track (handle → right end) as a thin gray line.
+        // We set widgets.inactive.bg_fill = WHITE for the handle, which also
+        // made the native rail invisible, so we draw the remaining portion manually.
+        if use_slider {
+            let base_r  = h / 2.5;
+            let t       = ((val - min) / (max - min)) as f32;
+            let left    = resp.rect.left();
+            let handle_x = egui::lerp(
+                (left + base_r)..=(left + track_w - base_r),
+                t.clamp(0.0, 1.0),
+            );
+            let track_right = left + track_w;
+            let cy = resp.rect.center().y;
+            let rail_h  = 4.0_f32; // match egui default rail height
+            let rail_r  = egui::CornerRadius::same((rail_h / 2.0) as u8);
+            let right_rail = egui::Rect::from_min_max(
+                egui::pos2(handle_x + base_r + 1.0, cy - rail_h / 2.0),
+                egui::pos2(track_right, cy + rail_h / 2.0),
+            );
+            let rail_color = theme::current().control_off;
+            ui.painter().rect_filled(right_rail, rail_r, rail_color);
+        }
 
-    // Draw the right-side track (handle → right end) as a thin gray line.
-    // We set widgets.inactive.bg_fill = WHITE for the handle, which also
-    // made the native rail invisible, so we draw the remaining portion manually.
-    if use_slider {
-        let base_r  = h / 2.5;
-        let t       = ((val - min) / (max - min)) as f32;
-        let left    = resp.rect.left();
-        let handle_x = egui::lerp(
-            (left + base_r)..=(left + track_w - base_r),
-            t.clamp(0.0, 1.0),
-        );
-        let track_right = left + track_w;
-        let cy = resp.rect.center().y;
-        let rail_h  = 4.0_f32; // match egui default rail height
-        let rail_r  = egui::CornerRadius::same((rail_h / 2.0) as u8);
-        let right_rail = egui::Rect::from_min_max(
-            egui::pos2(handle_x + base_r + 1.0, cy - rail_h / 2.0),
-            egui::pos2(track_right, cy + rail_h / 2.0),
-        );
-        let rail_color = theme::current().control_off;
-        ui.painter().rect_filled(right_rail, rail_r, rail_color);
-    }
-
-    if resp.changed() {
-        config.set_number(key_path, val, NumberRepr::from_step(step));
-    }
-    if field.reset {
-        if let Some(initial) = field.initial {
-            if ui.button("↺").on_hover_text("Reset").clicked() {
-                config.set_number(key_path, initial, NumberRepr::from_step(step));
+        if resp.changed() {
+            config.set_number(key_path, val, NumberRepr::from_step(step));
+        }
+        if field.reset {
+            if let Some(initial) = field.initial {
+                if ui.button("↺").on_hover_text("Reset").clicked() {
+                    config.set_number(key_path, initial, NumberRepr::from_step(step));
+                }
             }
         }
+    };
+    if show_reset {
+        ui.horizontal(|ui| draw_control(ui));
+    } else {
+        draw_control(ui);
     }
 }
-
 /// Formats `val` the way egui's DragValue/Slider would display it.
 /// Used to measure the value-box width before rendering.
 fn numeric_display_string(val: f64, step: f64, suffix: &str) -> String {
