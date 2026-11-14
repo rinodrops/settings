@@ -106,3 +106,9 @@ label = "The second item"
 shortcut = "cmd+2"
 category = "beta"
 description = "This is the second item in the variable section."
+
+[palette_demo]
+profiles = [
+    { id = "demo-warm", name = "Warm", color = "terracotta" },
+    { id = "demo-custom", name = "Custom", color = "custom:202:53:70" },
+]

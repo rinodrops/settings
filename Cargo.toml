@@ -24,6 +24,7 @@ toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }
 rfd = "0.15"
 notify = "6"
+uuid = { version = "1", features = ["v4"] }
 
 # Native locale detection.
 # macOS: NSLocale.preferredLanguages reflects the per-app override

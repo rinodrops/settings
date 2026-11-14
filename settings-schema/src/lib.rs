@@ -243,12 +243,14 @@ pub enum SchemaValidationError {
     MigrationVersionExceedsTarget { version: u32, target: u32 },
     MigrationsWithoutSchemaVersion,
     TransformMissingMatch { location: String },
+    InvalidPalette { location: String, detail: String },
 }
 
 impl SchemaValidationError {
     /// Short error summary for the `error:` line (no location suffix).
     pub fn summary(&self) -> String {
         match self {
+            Self::InvalidPalette { detail, .. } => format!("invalid color palette: {detail}"),
             Self::DuplicateConstraintId { id } => format!("duplicate constraint id {id:?}"),
             Self::UnknownConstraintRef { id, .. } => {
                 format!("unknown constraint id {id:?}")
@@ -306,13 +308,17 @@ impl SchemaValidationError {
             | Self::DuplicateOptionStateValue { location, .. }
             | Self::UnknownOptionValue { location, .. }
             | Self::InvalidCelExpression { location, .. }
-            | Self::TransformMissingMatch { location } => Some(location),
+            | Self::TransformMissingMatch { location }
+            | Self::InvalidPalette { location, .. } => Some(location),
         }
     }
 
     /// Actionable hint for the `help:` line.
     pub fn help(&self) -> &'static str {
         match self {
+            Self::InvalidPalette { .. } => {
+                "provide named swatches with unique IDs and HSV values in range"
+            }
             Self::DuplicateConstraintId { .. } => {
                 "use a unique `id` for each [[constraints]] entry"
             }
@@ -758,6 +764,15 @@ fn validate_field(
     let location = ctx.location();
     let field = ctx.field;
 
+    if field.widget == WidgetKind::ColorPalette {
+        validate_palette(errors, &location, field);
+    }
+    for item in &field.item_fields {
+        if item.widget == WidgetKind::ColorPalette {
+            validate_palette(errors, &format!("{location}.item_fields key={:?}", item.key), item);
+        }
+    }
+
     for entry in &field.validate {
         if let ValidateEntry::Ref(id) = entry {
             match constraints.get(id.as_str()) {
@@ -829,6 +844,25 @@ fn validate_field(
     }
 }
 
+fn validate_palette(errors: &mut Vec<SchemaValidationError>, location: &str, field: &Field) {
+    let mut invalid = |detail: String| {
+        errors.push(SchemaValidationError::InvalidPalette { location: location.to_owned(), detail });
+    };
+    if field.colors.is_empty() {
+        invalid("colors must include a default swatch".to_owned());
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for color in &field.colors {
+        if color.id.trim().is_empty() || color.id.contains(':') || !ids.insert(&color.id) {
+            invalid(format!("invalid or duplicate swatch ID {:?}", color.id));
+        }
+        let [hue, saturation, value] = color.hsv;
+        if hue >= 360 || saturation > 100 || value > 100 {
+            invalid(format!("swatch {:?} has out-of-range HSV values", color.id));
+        }
+    }
+}
+
 fn widget_kind_name(widget: &WidgetKind) -> &'static str {
     match widget {
         WidgetKind::TextInput => "text_input",
@@ -845,6 +879,7 @@ fn widget_kind_name(widget: &WidgetKind) -> &'static str {
         WidgetKind::Separator => "separator",
         WidgetKind::FilePath => "file_path",
         WidgetKind::ColorPicker => "color_picker",
+        WidgetKind::ColorPalette => "color_palette",
         WidgetKind::KeyValueMap => "key_value_map",
         WidgetKind::RecordList => "record_list",
     }
@@ -1132,6 +1167,15 @@ pub struct Field {
     /// Fields that make up one row of a `record_list`. Keys are relative to the row.
     #[serde(default)]
     pub item_fields: Vec<Field>,
+    /// When set, show compact record headers using this relative text key.
+    pub record_title_key: Option<String>,
+    /// Relative string key for a persisted record identity.
+    pub record_id_key: Option<String>,
+    /// Built-in choices for a color palette. The first choice is the default.
+    #[serde(default)]
+    pub colors: Vec<PaletteColor>,
+    /// Optional former numeric hue key, relative to this field's parent.
+    pub legacy_hue_key: Option<String>,
     /// Name of a host callback invoked when a value in this widget changes.
     pub on_change: Option<String>,
 
@@ -1141,6 +1185,14 @@ pub struct Field {
     /// Show a button that writes `initial` back into the field.
     #[serde(default)]
     pub reset: bool,
+}
+
+/// Named swatch with an HSV value in degrees and percentages.
+#[derive(Debug, Deserialize)]
+pub struct PaletteColor {
+    pub id: String,
+    pub label: LocalizedString,
+    pub hsv: [u16; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,6 +1220,8 @@ pub enum WidgetKind {
     FilePath,
     /// Color swatch that opens an inline color picker popup. Stored as `"#rrggbb"` in TOML.
     ColorPicker,
+    /// Named swatches and custom HSV. Stores a swatch ID or `custom:H:S:V`.
+    ColorPalette,
     /// Editable table of string key → string value pairs.
     KeyValueMap,
     /// Ordered list of records. Each row is the `item_fields` widgets.

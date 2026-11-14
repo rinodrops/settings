@@ -215,6 +215,17 @@ are numeric strings used as segment labels and stored values. When every option
 omits `.`, whole numbers are written as integer literals (e.g. `count = 3`); if any
 option contains `.`, floats are used (e.g. `weight = 2.0`).
 
+### Color palettes and ordered records
+
+A `color_palette` field defines its `colors` as a list of swatches. Give each
+swatch a stable `id`, a localized `label`, and `hsv` values in degrees and
+percentages. The first swatch is the default. A palette stores either that
+swatch's ID or a string such as `custom:202:53:70`.
+
+A `record_list` with `record_title_key` shows expandable rows based on a
+field such as `name`. Use `record_id_key` to persist each row's identity
+across edits and reordering. The Palettes demo shows both features together.
+
 ## Config migration
 
 When a parent app renames, moves, or removes config keys, existing user config

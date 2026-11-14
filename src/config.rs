@@ -215,16 +215,49 @@ impl ConfigStore {
         item.as_float().or_else(|| item.as_integer().map(|i| i as f64))
     }
 
+    /// Retain existing identities, assigning one to each legacy or duplicate record.
+    pub fn ensure_record_ids(&mut self, path: &str, key: &str) {
+        let paths: Vec<_> = (0..self.record_len(path))
+            .map(|index| format!("{path}[{index}].{key}"))
+            .collect();
+        let mut used: std::collections::HashSet<_> = paths.iter()
+            .filter_map(|path| self.get_str(path))
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for (index, field) in paths.iter().enumerate() {
+            if self.get_str(field).is_some_and(|id| !id.trim().is_empty() && seen.insert(id.to_owned())) {
+                continue;
+            }
+            // Keep identities in sync with hosts that still have a pre-migration record open.
+            let preferred = format!("legacy-{index}");
+            let id = if used.insert(preferred.clone()) { preferred } else { uuid::Uuid::new_v4().to_string() };
+            self.set_str(field, &id);
+        }
+    }
+
     /// Number of records in the array at `path`. Missing arrays have length 0.
     pub fn record_len(&self, path: &str) -> usize {
-        self.get_item(path)
-            .and_then(|item| item.as_array())
-            .map(|array| array.len())
-            .unwrap_or(0)
+        match self.get_item(path) {
+            Some(Item::ArrayOfTables(array)) => array.len(),
+            Some(item) => item.as_array().map_or(0, |array| array.len()),
+            None => 0,
+        }
     }
 
     /// Append an empty record. Creates the array when it is absent.
     pub fn record_push(&mut self, path: &str) -> Option<usize> {
+        if let Some(Item::ArrayOfTables(array)) = self.get_item_mut(path) {
+            let mut table = Table::new();
+            if let Some(position) = array.iter().filter_map(Table::position).max() {
+                table.set_position(position + 1);
+            }
+            array.push(table);
+            let len = array.len();
+            self.dirty = true;
+            return Some(len - 1);
+        }
         self.ensure_array(path)?;
         let len = {
             let array = self.get_item_mut(path)?.as_array_mut()?;
@@ -237,6 +270,14 @@ impl ConfigStore {
 
     /// Remove the record at `index`.
     pub fn record_remove(&mut self, path: &str, index: usize) -> bool {
+        if let Some(Item::ArrayOfTables(array)) = self.get_item_mut(path) {
+            if index >= array.len() {
+                return false;
+            }
+            array.remove(index);
+            self.dirty = true;
+            return true;
+        }
         let removed = {
             let Some(array) = self.get_item_mut(path).and_then(|item| item.as_array_mut()) else {
                 return false;
@@ -258,6 +299,23 @@ impl ConfigStore {
         if from == to {
             return false;
         }
+        if let Some(Item::ArrayOfTables(array)) = self.get_item_mut(path) {
+            if from >= array.len() || to >= array.len() {
+                return false;
+            }
+            let mut tables: Vec<_> = array.iter().cloned().collect();
+            let positions: Vec<_> = tables.iter().map(Table::position).collect();
+            let table = tables.remove(from);
+            tables.insert(to, table);
+            for (table, position) in tables.iter_mut().zip(positions) {
+                if let Some(position) = position {
+                    table.set_position(position);
+                }
+            }
+            *array = tables.into_iter().collect();
+            self.dirty = true;
+            return true;
+        }
         let moved = {
             let Some(array) = self.get_item_mut(path).and_then(|item| item.as_array_mut()) else {
                 return false;
@@ -276,11 +334,10 @@ impl ConfigStore {
     }
 
     fn record_value(&self, array: &str, index: usize, key: &str) -> Option<&toml_edit::Value> {
-        self.get_item(array)?
-            .as_array()?
-            .get(index)?
-            .as_inline_table()?
-            .get(key)
+        match self.get_item(array)? {
+            Item::ArrayOfTables(tables) => tables.get(index)?.get(key)?.as_value(),
+            item => item.as_array()?.get(index)?.as_inline_table()?.get(key),
+        }
     }
 
     fn ensure_array(&mut self, path: &str) -> Option<()> {
@@ -292,6 +349,14 @@ impl ConfigStore {
     }
 
     fn set_record_value(&mut self, array: &str, index: usize, key: &str, value: toml_edit::Value) -> bool {
+        if let Some(Item::ArrayOfTables(tables)) = self.get_item_mut(array) {
+            let Some(table) = tables.get_mut(index) else {
+                return false;
+            };
+            table.insert(key, Item::Value(value));
+            self.dirty = true;
+            return true;
+        }
         if self.ensure_array(array).is_none() {
             return false;
         }
@@ -661,6 +726,36 @@ mod tests {
         let _ = store;
     }
 
+    #[test]
+    fn legacy_table_records_keep_ids_when_reordered_and_reloaded() {
+        let (mut store, path) = store_from("profiles", r#"
+            [[pets]]
+            name = "Mikan"
+            hue = 38
+
+            [[pets]]
+            name = "Koke"
+            id = "existing"
+        "#);
+        store.ensure_record_ids("pets", "id");
+        assert!(store.record_move("pets", 1, 0));
+        assert!(store.set_str("pets[1].color", "custom:180:60:80"));
+        store.save().unwrap();
+
+        let mut store = ConfigStore::load(&path).unwrap();
+        store.ensure_record_ids("pets", "id");
+        assert!(!store.is_dirty());
+        assert_eq!(store.get_str("pets[0].id"), Some("existing"));
+        assert_eq!(store.get_str("pets[1].id"), Some("legacy-0"));
+        assert_eq!(store.get_str("pets[1].color"), Some("custom:180:60:80"));
+        assert_eq!(store.get_number("pets[1].hue"), Some(38.0));
+        assert_eq!(store.record_push("pets"), Some(2));
+        assert!(store.record_remove("pets", 0));
+        assert_eq!(store.get_str("pets[0].name"), Some("Mikan"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn set_number_writes_integer_literal() {
         let path = std::env::temp_dir().join(format!(
             "settings_number_repr_test_{}.toml",

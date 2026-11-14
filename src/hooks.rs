@@ -39,3 +39,16 @@ pub(crate) fn on_change(change: &Change) -> Option<Preview> {
     let hook = guard.as_mut()?;
     hook(change)
 }
+
+type LegacyColorHook = fn(&str, f64, [u16; 3]) -> [u16; 3];
+
+static LEGACY_COLOR: Mutex<Option<LegacyColorHook>> = Mutex::new(None);
+
+/// Set the initial HSV values for an existing host-defined hue adjustment.
+pub fn set_legacy_color_resolver(resolve: fn(&str, f64, [u16; 3]) -> [u16; 3]) {
+    *LEGACY_COLOR.lock().expect("legacy color resolver") = Some(resolve);
+}
+
+pub(crate) fn legacy_color(path: &str, hue: f64, base: [u16; 3]) -> Option<[u16; 3]> {
+    LEGACY_COLOR.lock().expect("legacy color resolver").map(|resolve| resolve(path, hue, base))
+}

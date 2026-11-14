@@ -62,14 +62,14 @@ const FIELD_ROUNDING: u8 = 6;
 const FIELD_BORDER_W_IDLE: f32 = 1.0;
 
 /// Gap between the field's outer edge and the inner edge of the focus ring (px).
-const FOCUS_RING_GAP:      f32 = 2.0;
+const FOCUS_RING_GAP:      f32 = 1.0;
 
 /// Stroke width of the focus ring (px).  The ring occupies [gap, gap+width] outside the field.
-const FOCUS_RING_W:        f32 = 4.0;
+const FOCUS_RING_W:        f32 = 2.0;
 
 /// Corner radius of the focus ring (px).  Intentionally smaller than FIELD_ROUNDING
 /// so the ring appears visually distinct from (not concentric with) the field border.
-const FOCUS_RING_ROUNDING: u8  = 3;
+const FOCUS_RING_ROUNDING: u8  = FIELD_ROUNDING;
 
 /// Horizontal inset applied to the widget column so the focus ring fits inside the grid
 /// cell on both sides (px).  Must be ≥ FOCUS_RING_GAP + FOCUS_RING_W.
@@ -626,7 +626,12 @@ fn show_flat_fields(
             .show(ui, |ui| {
                 for field in fields {
                     if field.widget == WidgetKind::Separator {
-                        render_separator_row(ui);
+                        if field.label.get().is_empty() {
+                            render_separator_row(ui);
+                        } else {
+                            ui.strong(field.label.get());
+                            ui.end_row();
+                        }
                         continue;
                     }
                     let key_path = field.key.as_str();
@@ -1057,7 +1062,9 @@ fn label_anchor(kind: &WidgetKind) -> LabelAnchor {
         // A vertical list of options; align the label to the first one.
         WidgetKind::ExclusiveRadio => LabelAnchor::FirstLine,
         // A multi-row box; align the label to the first visible text line.
-        WidgetKind::Multiline => LabelAnchor::FirstLine,
+        WidgetKind::Multiline | WidgetKind::ColorPalette | WidgetKind::RecordList => {
+            LabelAnchor::FirstLine
+        }
         // Everything else vertically centers its text within the widget box.
         _ => LabelAnchor::Center,
     }
@@ -1298,6 +1305,10 @@ fn render_widget_inner(
 
         WidgetKind::ColorPicker => {
             render_color_picker(ui, key_path, config);
+        }
+
+        WidgetKind::ColorPalette => {
+            crate::palette::render(ui, field, key_path, config, accent);
         }
 
         WidgetKind::KeyValueMap => {
@@ -2325,40 +2336,89 @@ fn render_record_list(
     pending: &mut PendingFilePick,
     accent: egui::Color32,
 ) {
-    let mut len = config.record_len(key_path);
+    use crate::palette::localized;
+
+    if let Some(key) = &field.record_id_key {
+        config.ensure_record_ids(key_path, key);
+    }
+    let len = config.record_len(key_path);
+    let expanded_slot = ui.id().with(("expanded_record", key_path));
+    let mut expanded = ui.data(|data| data.get_temp::<String>(expanded_slot));
     let mut move_pair: Option<(usize, usize)> = None;
     let mut remove_at: Option<usize> = None;
 
     for index in 0..len {
         let record = format!("{key_path}[{index}]");
-        let frame = egui::Frame::group(ui.style());
-        let (_, dropped) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
+        let stable_id = field.record_id_key.as_ref()
+            .and_then(|key| config.get_str(&format!("{record}.{key}")).map(str::to_owned))
+            .unwrap_or_else(|| format!("legacy-{index}"));
+        let compact = field.record_title_key.is_some();
+        let visible = !compact || expanded.as_deref() == Some(stable_id.as_str());
+        let width = ui.available_width();
+        let fill = if visible { theme::current().header_bg } else { theme::current().bg };
+        let frame = egui::Frame::default()
+            .inner_margin(egui::Margin::symmetric(6, 4))
+            .corner_radius(FIELD_ROUNDING)
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, theme::current().separator));
+        let row = frame.show(ui, |ui| {
+            ui.set_width((width - 14.0).max(0.0));
             ui.horizontal(|ui| {
-                let _ = ui.dnd_drag_source(egui::Id::new((&record, "drag")), index, |ui| {
-                    ui.label("≡");
+                let payload = (key_path.to_owned(), index);
+                ui.dnd_drag_source(egui::Id::new((&record, "drag")), payload, |ui| {
+                    ui.label("≡").on_hover_text(localized("Drag to reorder", "ドラッグして並べ替え"));
                 });
-                ui.label(format!("{}", index + 1));
-                if ui.button("✕").clicked() {
-                    remove_at = Some(index);
-                }
-            });
-            ui.horizontal(|ui| {
-                let gap = ui.spacing().item_spacing.x;
-                let preview = if field.on_change.is_some() {
-                    preview_display_size(ui, &record)
+                if let Some(key) = &field.record_title_key {
+                    let title = config.get_str(&format!("{record}.{key}"))
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or(localized("Untitled", "名前未入力"));
+                    if ui.selectable_label(visible, format!("{}. {title}", index + 1)).clicked() {
+                        expanded = (!visible).then_some(stable_id.clone());
+                    }
                 } else {
-                    egui::Vec2::ZERO
-                };
-                let fields_w = if preview.x > 0.0 {
+                    ui.label(format!("{}", index + 1));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text(localized("Remove", "削除")).clicked() {
+                        remove_at = Some(index);
+                    }
+                    if compact {
+                        if ui.add_enabled(index + 1 < len, egui::Button::new("↓").small())
+                            .on_hover_text(localized("Move down", "下へ移動")).clicked()
+                        {
+                            move_pair = Some((index, index + 1));
+                        }
+                        if ui.add_enabled(index > 0, egui::Button::new("↑").small())
+                            .on_hover_text(localized("Move up", "上へ移動")).clicked()
+                        {
+                            move_pair = Some((index, index - 1));
+                        }
+                    }
+                });
+            });
+            if compact && expanded.as_deref() != Some(&stable_id) {
+                return;
+            }
+            let gap = ui.spacing().item_spacing.x;
+            let preview = if field.on_change.is_some() {
+                preview_display_size(ui, &record)
+            } else {
+                egui::Vec2::ZERO
+            };
+            let inline_preview = preview.x > 0.0 && ui.available_width() >= preview.x + gap + 285.0;
+            let editor = egui::Id::new(("palette_editor", key_path, &stable_id));
+            let info = egui::UiStackInfo::default().with_tag_value("palette_editor", editor);
+            ui.scope_builder(egui::UiBuilder::new().id_salt(&stable_id).ui_stack_info(info), |ui| ui.horizontal(|ui| {
+                let fields_w = if inline_preview {
                     (ui.available_width() - preview.x - gap).max(160.0)
                 } else {
                     ui.available_width()
                 };
                 ui.vertical(|ui| {
                     ui.set_max_width(fields_w);
-                    egui::Grid::new(("record_fields", record.clone()))
+                    egui::Grid::new(("record_fields", &stable_id))
                         .num_columns(2)
-                        .min_col_width(72.0)
+                        .min_col_width(60.0)
                         .spacing([8.0, 4.0])
                         .show(ui, |ui| {
                             for item in &field.item_fields {
@@ -2379,27 +2439,46 @@ fn render_record_list(
                             }
                         });
                 });
-                if preview.x > 0.0 {
+                if inline_preview {
                     show_record_preview(ui, field, &record, config);
                 }
-            });
+            }));
+            if preview.x > 0.0 && !inline_preview {
+                show_record_preview(ui, field, &record, config);
+            }
         });
-        if let Some(from) = dropped {
-            if *from != index {
-                move_pair = Some((*from, index));
+        if let Some(payload) = row.response.dnd_hover_payload::<(String, usize)>() {
+            let (list, from) = payload.as_ref();
+            if list == key_path && *from != index {
+                ui.painter().rect_stroke(row.response.rect, FIELD_ROUNDING,
+                    egui::Stroke::new(1.0, accent), egui::StrokeKind::Inside);
+                if row.response.dnd_release_payload::<(String, usize)>().is_some() {
+                    move_pair = Some((*from, index));
+                }
             }
         }
     }
 
     if let Some(index) = remove_at {
         config.record_remove(key_path, index);
-        len = config.record_len(key_path);
-    }
-    if let Some((from, to)) = move_pair {
+        if field.record_id_key.is_none() {
+            expanded = None;
+        }
+    } else if let Some((from, to)) = move_pair {
         config.record_move(key_path, from, to);
+        if field.record_id_key.is_none() {
+            expanded = Some(format!("legacy-{to}"));
+        }
     }
-    if ui.button("+").clicked() {
+    if ui.button("+").on_hover_text(localized("Add", "追加")).clicked() {
         if let Some(index) = config.record_push(key_path) {
+            if let Some(key) = &field.record_id_key {
+                let id = uuid::Uuid::new_v4().to_string();
+                config.set_str(&format!("{key_path}[{index}].{key}"), &id);
+                expanded = Some(id);
+            } else {
+                expanded = Some(format!("legacy-{index}"));
+            }
             for item in &field.item_fields {
                 if let Some(initial) = item.initial {
                     let path = format!("{key_path}[{index}].{}", item.key);
@@ -2408,7 +2487,7 @@ fn render_record_list(
             }
         }
     }
-    let _ = len;
+    ui.data_mut(|data| data.insert_temp(expanded_slot, expanded.unwrap_or_default()));
 }
 
 /// Display size of a record preview. Height stays 96px; width follows the image.
@@ -2427,19 +2506,14 @@ fn show_record_preview(ui: &mut egui::Ui, field: &Field, record: &str, config: &
     let Some(callback) = field.on_change.clone() else {
         return;
     };
-    let values: Vec<(String, String)> = field
-        .item_fields
-        .iter()
-        .map(|item| {
-            let path = format!("{record}.{}", item.key);
-            let text = config
-                .get_str(&path)
-                .map(str::to_owned)
-                .or_else(|| config.get_number(&path).map(|n| n.to_string()))
-                .unwrap_or_default();
-            (item.key.clone(), text)
-        })
-        .collect();
+    let values: Vec<(String, String)> = field.item_fields.iter().flat_map(|item| {
+        std::iter::once(item.key.as_str()).chain(item.legacy_hue_key.as_deref())
+    }).map(|key| {
+        let path = format!("{record}.{key}");
+        let value = config.get_str(&path).map(str::to_owned)
+            .or_else(|| config.get_number(&path).map(|n| n.to_string()));
+        (key.to_owned(), value.unwrap_or_default())
+    }).collect();
     let fingerprint = format!("{callback}:{values:?}");
     let seen_id = egui::Id::new(("record_preview", record));
     let previous = ui.data(|d| d.get_temp::<String>(seen_id));
@@ -2545,13 +2619,13 @@ fn render_numeric(
                 // trailing fill uses selection.bg_fill for the left track portion.
                 ui.visuals_mut().selection.bg_fill = accent;
                 // handle: white circle with accent border.
-                let border = egui::Stroke::new(2.0, accent);
+                let border = egui::Stroke::new(1.0, accent);
                 ui.visuals_mut().widgets.inactive.bg_fill = white;
                 ui.visuals_mut().widgets.inactive.fg_stroke = border;
                 ui.visuals_mut().widgets.hovered.bg_fill = white;
-                ui.visuals_mut().widgets.hovered.fg_stroke = egui::Stroke::new(2.5, accent);
+                ui.visuals_mut().widgets.hovered.fg_stroke = egui::Stroke::new(1.5, accent);
                 ui.visuals_mut().widgets.active.bg_fill = white;
-                ui.visuals_mut().widgets.active.fg_stroke = egui::Stroke::new(2.5, accent);
+                ui.visuals_mut().widgets.active.fg_stroke = egui::Stroke::new(1.5, accent);
 
                 let decimals = if step >= 1.0 {
                     0
@@ -3161,6 +3235,13 @@ fn setup_visuals(ctx: &egui::Context, pal: &Palette) {
     vis.widgets.open.corner_radius           = rounding;
     vis.widgets.open.bg_stroke               = stroke_idle;
 
+    vis.widgets.inactive.weak_bg_fill = pal.header_bg;
+    vis.widgets.hovered.weak_bg_fill = pal.control_track;
+    vis.widgets.active.weak_bg_fill = pal.selection_bg;
+    vis.widgets.open.weak_bg_fill = pal.control_track;
+    vis.widgets.hovered.expansion = 0.0;
+    vis.widgets.active.expansion = 0.0;
+
     ctx.set_visuals(vis);
 }
 
@@ -3174,6 +3255,9 @@ fn is_dark(c: egui::Color32) -> bool {
 
 fn setup_style(ctx: &egui::Context) {
     ctx.style_mut(|s| {
+        s.spacing.slider_rail_height = 4.0;
+        s.spacing.button_padding = egui::vec2(8.0, 3.0);
+        s.spacing.interact_size.y = 21.0;
         s.text_styles.insert(
             egui::TextStyle::Body,
             egui::FontId::new(FIELD_FONT_PX, egui::FontFamily::Proportional),

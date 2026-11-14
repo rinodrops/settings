@@ -8,12 +8,13 @@ mod config;
 mod hooks;
 mod i18n;
 mod migrate;
+mod palette;
 mod schema;
 mod single_instance;
 mod theme;
 mod validation;
 
-pub use hooks::{set_on_change, Change, Preview};
+pub use hooks::{set_legacy_color_resolver, set_on_change, Change, Preview};
 
 use std::path::PathBuf;
 
@@ -34,6 +35,17 @@ pub fn run() -> eframe::Result {
 
     if let Err(e) = migrate::run(&schema, &mut config) {
         eprintln!("warning: config migration failed: {e}");
+    }
+
+    for field in schema.tabs.iter().flat_map(|tab| tab.fields.iter().flatten()) {
+        if let Some(key) = &field.record_id_key {
+            config.ensure_record_ids(&field.key, key);
+        }
+    }
+    if config.is_dirty() {
+        if let Err(e) = config.save() {
+            eprintln!("warning: could not save record identities: {e}");
+        }
     }
 
     let parent_lang = schema
